@@ -4,14 +4,13 @@ boost_cog.py  -  the boost card feature as a PLUG-IN for your existing ELITE SYS
 It does NOT create a bot, does NOT sync commands and does NOT touch setup_hook / on_ready,
 so it cannot remove or override your other commands (/warn, /ban, ...).
 
-Files next to your main bot file:   boost_cog.py  +  boost_card.py   (+ optional fonts/ folder)
+Files next to your main bot file:   boost_cog.py  +  boost_card.py  +  boost_bg.jpg   (+ optional fonts/ folder)
 
 How to plug it in (in your main bot file, inside setup_hook, BEFORE the command sync):
 
     await bot.load_extension("boost_cog")
 
-Then restart. /boosttest appears with your other commands on the next sync
-(the next automatic sync, or mention the bot and type "sync" if your bot has that command).
+Then restart. !boosttest works right away (uses your bot's normal prefix, no sync needed).
 
 Permissions in the BOOST channel: View Channel, Send Messages, Attach Files,
 Read Message History, Manage Messages (to remove Discord's plain boost line).
@@ -19,6 +18,7 @@ Read Message History, Manage Messages (to remove Discord's plain boost line).
 Optional Railway variables:
     BOOST_CHANNEL_ID        post the cards in this channel instead of under the boost message
     DELETE_BOOST_MESSAGE    1 (default) = remove Discord's plain "just boosted" line, 0 = keep it
+    BOOST_ANIMATED          1 (default) = animated GIF card, 0 = still PNG
 """
 
 import asyncio
@@ -28,14 +28,12 @@ import traceback
 from typing import Optional
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
-from boost_card import render_boost_card
+from boost_card import render_boost_card, CARD_EXT
 
 # =========================== CONFIG ===========================
 GUILD_ID = 1410440666747633707
-GUILD = discord.Object(id=GUILD_ID)
 
 BOOST_CHANNEL_ID = int(os.environ["BOOST_CHANNEL_ID"]) if os.environ.get("BOOST_CHANNEL_ID", "").isdigit() else None
 DELETE_BOOST_MESSAGE = os.environ.get("DELETE_BOOST_MESSAGE", "1") == "1"
@@ -60,6 +58,7 @@ async def make_card(member, guild: discord.Guild, boosts: int = 1, level_up: Opt
     except Exception as e:
         print(f"⚠️ [boost] Couldn't fetch avatar for {member}: {e}")
         avatar = None
+    # drawing the animation takes ~2 s, so it runs in a thread and never blocks the bot
     return await asyncio.to_thread(
         render_boost_card, member.display_name, guild.name, avatar,
         guild.premium_tier, guild.premium_subscription_count or 0, boosts, level_up,
@@ -75,8 +74,8 @@ async def announce(guild, member, channel, boosts=1, level_up=None) -> bool:
     allowed = discord.AllowedMentions(users=[member], roles=False, everyone=False)
 
     try:
-        png = await make_card(member, guild, boosts, level_up)
-        await channel.send(text, file=discord.File(io.BytesIO(png), filename="boost.png"), allowed_mentions=allowed)
+        card = await make_card(member, guild, boosts, level_up)
+        await channel.send(text, file=discord.File(io.BytesIO(card), filename=f"boost.{CARD_EXT}"), allowed_mentions=allowed)
         print(f"💜 [boost] Card posted for {member} (level {guild.premium_tier}, {guild.premium_subscription_count} boosts)")
         return True
     except discord.Forbidden:
@@ -129,33 +128,32 @@ class BoostCog(commands.Cog):
             except discord.HTTPException:
                 pass
 
+    @commands.command(name="boosttest")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def boosttest(self, ctx: commands.Context, member: Optional[discord.Member] = None, level_up: Optional[int] = None):
+        """Preview the boost card (admins only).  Usage: !boosttest [@member] [level 1-3]"""
+        if level_up is not None and level_up not in (1, 2, 3):
+            return await ctx.send("❌ Level must be 1, 2 or 3.  Usage: `!boosttest [@member] [1-3]`")
+        target = member or ctx.author
+        async with ctx.typing():
+            try:
+                card = await make_card(target, ctx.guild, 1, level_up)
+            except Exception as e:
+                traceback.print_exc()
+                return await ctx.send(f"❌ Couldn't draw the card: {e}")
+        await ctx.send(file=discord.File(io.BytesIO(card), filename=f"boost_preview.{CARD_EXT}"))
 
-@app_commands.command(name="boosttest", description="Preview the boost card (admins only, only you see it)")
-@app_commands.describe(member="Whose avatar and name to use (default: you)", level_up="Preview the LEVEL UNLOCKED card (1-3)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.checks.has_permissions(administrator=True)
-@app_commands.guild_only()
-async def boosttest(
-    interaction: discord.Interaction,
-    member: Optional[discord.Member] = None,
-    level_up: Optional[app_commands.Range[int, 1, 3]] = None,
-):
-    await interaction.response.defer(ephemeral=True)
-    target = member or interaction.user
-    try:
-        png = await make_card(target, interaction.guild, 1, level_up)
-    except Exception as e:
-        traceback.print_exc()
-        return await interaction.followup.send(f"❌ Couldn't draw the card: {e}", ephemeral=True)
-    await interaction.followup.send(file=discord.File(io.BytesIO(png), filename="boost_preview.png"), ephemeral=True)
+    @boosttest.error
+    async def boosttest_error(self, ctx: commands.Context, error):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("❌ Only administrators can use this.")
+        elif isinstance(error, (commands.BadArgument, commands.MemberNotFound)):
+            await ctx.send("❌ Usage: `!boosttest [@member] [1-3]`")
+        else:
+            raise error
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BoostCog(bot))
-    # Registered for the ELT server only, next to the commands your bot already has.
-    bot.tree.add_command(boosttest, guild=GUILD, override=True)
     print("💜 [boost] Boost cards loaded")
-
-
-async def teardown(bot: commands.Bot):
-    bot.tree.remove_command("boosttest", guild=GUILD)
